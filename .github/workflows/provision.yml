@@ -1,0 +1,77 @@
+name: Provision Ephemeral AKS Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Full image reference to deploy, e.g. user/repo:sha"
+        required: true
+  repository_dispatch:
+    types: [provision-env]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TTL_MINUTES: 20
+  LOCATION: eastus
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "image_tag=${{ github.event.client_payload.image_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "rg_name=rg-ephemeral-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create tagged resource group
+        run: |
+          az group create \
+            --name ${{ steps.vars.outputs.rg_name }} \
+            --location $LOCATION \
+            --tags purpose=ephemeral-demo ttl-minutes=$TTL_MINUTES created-at=${{ steps.vars.outputs.created_at }}
+
+      - name: Create AKS cluster
+        run: |
+          az aks create \
+            --resource-group ${{ steps.vars.outputs.rg_name }} \
+            --name aks-${{ github.run_id }} \
+            --node-count 1 \
+            --node-vm-size Standard_B2s \
+            --tier free \
+            --generate-ssh-keys \
+            --tags purpose=ephemeral-demo
+
+      - name: Get cluster credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ steps.vars.outputs.rg_name }} \
+            --name aks-${{ github.run_id }} \
+            --overwrite-existing
+
+      - name: Deploy app to cluster
+        run: |
+          sed "s|PLACEHOLDER_IMAGE|${{ steps.vars.outputs.image_tag }}|" k8s/deployment.yaml | kubectl apply -f -
+          kubectl rollout status deployment/demo-app --timeout=120s
+
+      - name: Print environment info
+        run: |
+          echo "Resource group: ${{ steps.vars.outputs.rg_name }}"
+          echo "Auto-deletes after $TTL_MINUTES minutes (handled by reaper.yml)"
+          kubectl get svc demo-app
