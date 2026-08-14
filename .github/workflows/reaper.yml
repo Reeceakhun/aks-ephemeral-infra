@@ -1,0 +1,54 @@
+name: Reap Expired Ephemeral Environments
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Find and delete expired resource groups
+        run: |
+          set -euo pipefail
+          now_epoch=$(date -u +%s)
+
+          groups=$(az group list --tag purpose=ephemeral-demo -o json)
+
+          echo "$groups" | jq -c '.[]' | while read -r group; do
+            name=$(echo "$group" | jq -r '.name')
+            created_at=$(echo "$group" | jq -r '.tags."created-at" // empty')
+            ttl_minutes=$(echo "$group" | jq -r '.tags."ttl-minutes" // "20"')
+
+            if [ -z "$created_at" ]; then
+              echo "Skipping $name — no created-at tag, can't determine age"
+              continue
+            fi
+
+            created_epoch=$(date -u -d "$created_at" +%s)
+            age_minutes=$(( (now_epoch - created_epoch) / 60 ))
+
+            echo "$name — age: ${age_minutes}m, ttl: ${ttl_minutes}m"
+
+            if [ "$age_minutes" -ge "$ttl_minutes" ]; then
+              echo "Deleting $name (expired)"
+              az group delete --name "$name" --yes --no-wait
+            else
+              echo "$name not yet expired, leaving it"
+            fi
+          done
+
+      - name: Report remaining ephemeral groups
+        run: |
+          az group list --tag purpose=ephemeral-demo -o table
