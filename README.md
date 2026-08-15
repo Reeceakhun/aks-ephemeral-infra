@@ -14,6 +14,23 @@ request one without duplicating provisioning logic or teardown safety nets
 across every pipeline that needs a test environment.
 
 ## How it works
+
+```
+App repo pipeline finishes build
+        │
+        ▼
+fires repository_dispatch → this repo
+        │
+        ▼
+provision.yml creates a tagged resource group + AKS cluster,
+deploys the given image, prints the service endpoint
+        │
+        ▼
+reaper.yml (running independently, every 5 min) checks the
+age of every ephemeral-tagged resource group and deletes any
+past its TTL — currently 20 minutes
+```
+
 The provisioner and the reaper are deliberately decoupled: the provisioner's
 only responsibility is "create and tag correctly." The reaper's only
 responsibility is "delete anything expired." Neither depends on the other
@@ -39,6 +56,29 @@ own lifecycle.
 Uses OIDC federation between this repo's GitHub Actions and an Azure AD App
 Registration — no client secret or long-lived credential is stored anywhere.
 See [`docs/azure-setup.md`](docs/azure-setup.md) for the full setup.
+
+## Troubleshooting: OIDC federated credential subject mismatches
+
+Getting the federated credential's `subject` right took three attempts, and
+each failure was informative enough to keep documented rather than squash away:
+
+1. **Wrong branch in the subject** — first registered against
+   `ref:refs/heads/master`, but this repo's default branch is `main`. Azure
+   AD rejected the token with `AADSTS700213: No matching federated identity
+   record found`.
+2. **Wrong subject format entirely** — even after fixing the branch, the
+   same error persisted. The error message itself revealed the actual
+   subject GitHub was presenting:
+   `repo:Reeceakhun@84012952/aks-ephemeral-infra@1334270331:ref:refs/heads/main`
+   — newer GitHub OIDC tokens include internal numeric org/repo IDs
+   alongside their names, not just plain `owner/repo`. Azure AD requires an
+   exact string match, so the credential had to be recreated using that
+   literal subject.
+3. **Lesson:** don't hand-construct the subject from documentation examples
+   — when `azure/login` fails with `AADSTS700213`, the error message
+   contains the exact string Azure AD received. Copy it directly.
+
+See [`docs/azure-setup.md`](docs/azure-setup.md) for the corrected setup steps.
 
 ## Triggering a cluster manually
 
